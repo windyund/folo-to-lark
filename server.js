@@ -89,9 +89,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 来源校验:URL 里的 token 要和环境变量一致
-  const url = new URL(req.url, "http://localhost");
-  if (HOOK_TOKEN && url.searchParams.get("token") !== HOOK_TOKEN) {
+  // 来源校验:从 URL 里取 token(容错解析,失败不崩)
+  let token = "";
+  try {
+    token = new URL(req.url, "http://x").searchParams.get("token") || "";
+  } catch {
+    token = "";
+  }
+  if (HOOK_TOKEN && token !== HOOK_TOKEN) {
     res.writeHead(403).end("forbidden");
     return;
   }
@@ -117,4 +122,6 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => console.log(`folo-to-lark listening on :${PORT}`));
+server.listen(PORT, "0.0.0.0", () =>
+    console.log(`folo-to-lark listening on :${PORT}`)
+  );
