@@ -6,7 +6,6 @@
 // 部署见同目录 README。需要的环境变量:
 //   LARK_WEBHOOK  飞书自定义机器人 webhook 地址(必填)
 //   LARK_SECRET   机器人开了「签名校验」才填,否则留空
-//   HOOK_TOKEN    自己设的随机串,用于校验来源(必填)
 //   PORT          Railway 会自动注入,本地不填默认 3000
 //
 // 仅依赖 Node 内置模块,无需 npm install 任何东西。
@@ -16,7 +15,6 @@ const crypto = require("crypto");
 
 const LARK_WEBHOOK = process.env.LARK_WEBHOOK || "";
 const LARK_SECRET  = process.env.LARK_SECRET || "";
-const HOOK_TOKEN   = process.env.HOOK_TOKEN || "";
 const PORT         = process.env.PORT || 3000;
 
 function stripTags(s) {
@@ -89,18 +87,6 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // 来源校验:从 URL 里取 token(容错解析,失败不崩)
-  let token = "";
-  try {
-    token = new URL(req.url, "http://x").searchParams.get("token") || "";
-  } catch {
-    token = "";
-  }
-  if (HOOK_TOKEN && token !== HOOK_TOKEN) {
-    res.writeHead(403).end("forbidden");
-    return;
-  }
-
   let raw = "";
   req.on("data", (c) => (raw += c));
   req.on("end", async () => {
@@ -123,5 +109,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, "0.0.0.0", () =>
-    console.log(`folo-to-lark listening on :${PORT}`)
-  );
+  console.log(`folo-to-lark listening on :${PORT}`)
+);
