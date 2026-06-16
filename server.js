@@ -21,49 +21,63 @@ function stripTags(s) {
   return String(s == null ? "" : s).replace(/<[^>]+>/g, "").trim();
 }
 
+// ISO 时间转北京时间显示,如 2026-06-16 15:28
+function toBeijing(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso == null ? "" : iso);
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).format(d).replace(/\//g, "-");
+}
+
 // 飞书自定义机器人签名:key = `${timestamp}\n${secret}`,对空串做 HMAC-SHA256,再 base64
 function larkSign(timestamp) {
   const stringToSign = `${timestamp}\n${LARK_SECRET}`;
   return crypto.createHmac("sha256", stringToSign).update("").digest("base64");
 }
 
-function buildCard(entry) {
-  const text   = stripTags(entry.title || entry.description || entry.content) || "(无文本)";
+// 从可能的字段里找 Folo 的 AI 总结(字段名不确定,多试几个)
+function pickSummary(entry, payload) {
+  const cands = [
+    entry.aiSummary, entry.ai_summary, entry.summary, entry.summaryAi,
+    payload.aiSummary, payload.ai_summary, payload.summary,
+  ];
+  for (const c of cands) {
+    const s = stripTags(c);
+    if (s) return s;
+  }
+  return "";
+}
+
+function buildText(entry, payload) {
+  const body   = stripTags(entry.content || entry.description || entry.title) || "(无文本)";
   const link   = entry.url || entry.guid || "";
   const author = entry.author || "aleabitoreddit";
-  const when   = entry.publishedAt || "";
+  const when   = toBeijing(entry.publishedAt);
+  const summary = pickSummary(entry, payload);
 
-  const card = {
-    msg_type: "interactive",
-    card: {
-      config: { wide_screen_mode: true },
-      header: {
-        template: "blue",
-        title: { tag: "plain_text", content: `@${author} 发新帖了` },
-      },
-      elements: [
-        { tag: "div", text: { tag: "lark_md", content: text } },
-        { tag: "note", elements: [{ tag: "plain_text", content: String(when) }] },
-      ],
-    },
-  };
-  if (link) {
-    card.card.elements.push({
-      tag: "action",
-      actions: [{
-        tag: "button",
-        text: { tag: "plain_text", content: "在 X 上查看" },
-        url: link,
-        type: "primary",
-      }],
-    });
-  }
+  const mediaList = Array.isArray(entry.media) ? entry.media : [];
+  const mediaUrls = mediaList
+    .map((m) => (typeof m === "string" ? m : (m && (m.url || m.preview_image_url))))
+    .filter(Boolean);
+
+  const lines = [`📢 @${author} 发新帖了`];
+  if (when) lines.push(`🕒 ${when}`);
+  lines.push("");                      // 空行
+  lines.push(body);
+  if (summary) lines.push("", `🤖 AI 总结:${summary}`);
+  if (mediaUrls.length) lines.push("", `🖼 媒体:${mediaUrls.join("  ")}`);
+  if (link) lines.push("", `🔗 ${link}`);
+
+  const msg = { msg_type: "text", content: { text: lines.join("\n") } };
   if (LARK_SECRET) {
     const ts = Math.floor(Date.now() / 1000);
-    card.timestamp = String(ts);
-    card.sign = larkSign(ts);
+    msg.timestamp = String(ts);
+    msg.sign = larkSign(ts);
   }
-  return card;
+  return msg;
 }
 
 async function forwardToLark(card) {
@@ -97,8 +111,11 @@ const server = http.createServer((req, res) => {
       res.writeHead(400).end("bad json");
       return;
     }
+    // 临时:打印 Folo 真实 payload,用于确认 AI 总结在哪个字段。确认后可删。
+    console.log("Folo payload:", JSON.stringify(payload));
     try {
-      const result = await forwardToLark(buildCard(payload.entry || {}));
+      const entry = payload.entry || {};
+      const result = await forwardToLark(buildText(entry, payload));
       res.writeHead(result.status, { "Content-Type": "application/json" });
       res.end(result.body);
     } catch (e) {
