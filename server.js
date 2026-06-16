@@ -1,21 +1,30 @@
-// server.js —— Folo webhook → 飞书(Lark)机器人卡片 转换器(Railway 版)
+// server.js —— Folo webhook → DeepSeek 翻译/总结 → 飞书(Lark) 转发 (Railway 版)
 //
-// 作用:接收 Folo「Webhook」Action 的 POST,转成飞书自定义机器人要的卡片格式再转发。
-// 无状态:不用轮询、不用去重(Folo 已替你判新)。
+// 作用: 接收 Folo「Webhook」Action 的 POST, 用 DeepSeek 翻译并总结, 再推送到飞书机器人。
+// 无状态: 不用轮询、不用去重 (Folo 已替你判新)。
 //
-// 部署见同目录 README。需要的环境变量:
-//   LARK_WEBHOOK  飞书自定义机器人 webhook 地址(必填)
-//   LARK_SECRET   机器人开了「签名校验」才填,否则留空
-//   PORT          Railway 会自动注入,本地不填默认 3000
+// 环境变量:
+//   LARK_WEBHOOK       飞书自定义机器人 webhook 地址 (必填)
+//   LARK_SECRET        机器人开了「签名校验」才填, 否则留空
+//   DEEPSEEK_API_KEY   DeepSeek API Key (填了才做 AI 翻译/总结)
+//   DEEPSEEK_MODEL     模型名, 默认 deepseek-chat
+//   DEEPSEEK_BASE_URL  API 地址, 默认 https://api.deepseek.com
+//   PORT               Railway 会自动注入, 本地不填默认 3000
 //
-// 仅依赖 Node 内置模块,无需 npm install 任何东西。
+// 仅依赖 Node 内置模块, 无需 npm install 任何东西。
 
 const http = require("http");
 const crypto = require("crypto");
 
-const LARK_WEBHOOK = process.env.LARK_WEBHOOK || "";
-const LARK_SECRET  = process.env.LARK_SECRET || "";
-const PORT         = process.env.PORT || 3000;
+const LARK_WEBHOOK      = process.env.LARK_WEBHOOK || "";
+const LARK_SECRET       = process.env.LARK_SECRET || "";
+const DEEPSEEK_API_KEY  = process.env.DEEPSEEK_API_KEY || "";
+const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const DEEPSEEK_BASE_URL = (process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com").replace(/\/$/, "");
+const PORT              = process.env.PORT || 3000;
+
+const AI_TIMEOUT_MS = 45_000;
+const MAX_INPUT_CHARS = 6000;
 
 function stripTags(s) {
   return String(s == null ? "" : s).replace(/<[^>]+>/g, "").trim();
@@ -38,25 +47,74 @@ function larkSign(timestamp) {
   return crypto.createHmac("sha256", stringToSign).update("").digest("base64");
 }
 
-// 从可能的字段里找 Folo 的 AI 总结(字段名不确定,多试几个)
-function pickSummary(entry, payload) {
-  const cands = [
-    entry.aiSummary, entry.ai_summary, entry.summary, entry.summaryAi,
-    payload.aiSummary, payload.ai_summary, payload.summary,
-  ];
-  for (const c of cands) {
-    const s = stripTags(c);
-    if (s) return s;
-  }
-  return "";
+function truncate(s, max = MAX_INPUT_CHARS) {
+  const t = String(s || "");
+  if (t.length <= max) return t;
+  return t.slice(0, max) + "\n…(内容已截断)";
 }
 
-function buildText(entry, payload) {
+async function processWithDeepSeek(title, body) {
+  if (!DEEPSEEK_API_KEY) return null;
+
+  const userContent = [
+    title ? `标题: ${title}` : "",
+    `正文:\n${truncate(body)}`,
+  ].filter(Boolean).join("\n\n");
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AI_TIMEOUT_MS);
+
+  try {
+    const resp = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${DEEPSEEK_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: DEEPSEEK_MODEL,
+        stream: false,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是社交媒体内容助手。用户会给你一条帖子, 请输出 JSON, 字段:\n" +
+              '- "translation": 流畅的中文翻译; 若原文已是中文则给出润色后的中文\n' +
+              '- "summary": 2-3 句话概括核心要点\n' +
+              "只输出 JSON, 不要 markdown 代码块。",
+          },
+          { role: "user", content: userContent },
+        ],
+      }),
+      signal: controller.signal,
+    });
+
+    const data = await resp.json();
+    if (!resp.ok) {
+      const err = data.error?.message || resp.statusText;
+      throw new Error(`DeepSeek ${resp.status}: ${err}`);
+    }
+
+    const raw = data.choices?.[0]?.message?.content;
+    if (!raw) throw new Error("DeepSeek 返回空内容");
+
+    const parsed = JSON.parse(raw);
+    return {
+      translation: String(parsed.translation || "").trim(),
+      summary: String(parsed.summary || "").trim(),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function buildText(entry, ai) {
+  const title  = stripTags(entry.title);
   const body   = stripTags(entry.content || entry.description || entry.title) || "(无文本)";
   const link   = entry.url || entry.guid || "";
-  const author = entry.author || "aleabitoreddit";
+  const author = entry.author || "unknown";
   const when   = toBeijing(entry.publishedAt);
-  const summary = pickSummary(entry, payload);
 
   const mediaList = Array.isArray(entry.media) ? entry.media : [];
   const mediaUrls = mediaList
@@ -65,10 +123,17 @@ function buildText(entry, payload) {
 
   const lines = [`📢 @${author} 发新帖了`];
   if (when) lines.push(`🕒 ${when}`);
-  lines.push("");                      // 空行
-  lines.push(body);
-  if (summary) lines.push("", `🤖 AI 总结:${summary}`);
-  if (mediaUrls.length) lines.push("", `🖼 媒体:${mediaUrls.join("  ")}`);
+  if (title) lines.push("", `📌 ${title}`);
+  lines.push("", "—— 原文 ——", body);
+
+  if (ai?.translation) {
+    lines.push("", "—— 中文翻译 ——", ai.translation);
+  }
+  if (ai?.summary) {
+    lines.push("", "—— AI 总结 ——", ai.summary);
+  }
+
+  if (mediaUrls.length) lines.push("", `🖼 媒体: ${mediaUrls.join("  ")}`);
   if (link) lines.push("", `🔗 ${link}`);
 
   const msg = { msg_type: "text", content: { text: lines.join("\n") } };
@@ -111,11 +176,22 @@ const server = http.createServer((req, res) => {
       res.writeHead(400).end("bad json");
       return;
     }
-    // 临时:打印 Folo 真实 payload,用于确认 AI 总结在哪个字段。确认后可删。
-    console.log("Folo payload:", JSON.stringify(payload));
     try {
       const entry = payload.entry || {};
-      const result = await forwardToLark(buildText(entry, payload));
+      const title = stripTags(entry.title);
+      const body  = stripTags(entry.content || entry.description || entry.title);
+
+      let ai = null;
+      if (DEEPSEEK_API_KEY && body) {
+        try {
+          ai = await processWithDeepSeek(title, body);
+          console.log("DeepSeek 完成:", entry.url || entry.guid || "(无链接)");
+        } catch (e) {
+          console.error("DeepSeek 失败, 仍转发原文:", e.message || e);
+        }
+      }
+
+      const result = await forwardToLark(buildText(entry, ai));
       res.writeHead(result.status, { "Content-Type": "application/json" });
       res.end(result.body);
     } catch (e) {
@@ -125,6 +201,7 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, "0.0.0.0", () =>
-  console.log(`folo-to-lark listening on :${PORT}`)
-);
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`folo-to-lark listening on :${PORT}`);
+  console.log(`DeepSeek: ${DEEPSEEK_API_KEY ? `enabled (${DEEPSEEK_MODEL})` : "disabled (no DEEPSEEK_API_KEY)"}`);
+});
