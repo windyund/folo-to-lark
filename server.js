@@ -146,6 +146,9 @@ function buildText(entry, ai) {
 }
 
 async function forwardToLark(card) {
+  if (!LARK_WEBHOOK) {
+    throw new Error("LARK_WEBHOOK 未配置");
+  }
   const resp = await fetch(LARK_WEBHOOK, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -203,5 +206,15 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`folo-to-lark listening on :${PORT}`);
-  console.log(`DeepSeek: ${DEEPSEEK_API_KEY ? `enabled (${DEEPSEEK_MODEL})` : "disabled (no DEEPSEEK_API_KEY)"}`);
+  console.log(`Lark: ${LARK_WEBHOOK ? "configured" : "MISSING — set LARK_WEBHOOK"}`);
+  console.log(`DeepSeek: ${DEEPSEEK_API_KEY ? `enabled (${DEEPSEEK_MODEL})` : "disabled — set DEEPSEEK_API_KEY"}`);
 });
+
+// Railway 重新部署时会发 SIGTERM 停旧容器, npm 会误报 error, 属正常现象
+function shutdown(signal) {
+  console.log(`${signal} received, shutting down`);
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(0), 5000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));
