@@ -1,6 +1,6 @@
 // server.js —— Folo webhook → DeepSeek 翻译/总结 → 飞书(Lark) 转发 (Railway 版)
 //
-// 作用: 接收 Folo「Webhook」Action 的 POST, 用 DeepSeek 翻译并总结, 再推送到飞书机器人。
+// 作用: 接收 Folo「Webhook」Action 的 POST, 用 DeepSeek 翻译、解读并映射 A 股, 再推送到飞书机器人。
 // 无状态: 不用轮询、不用去重 (Folo 已替你判新)。
 //
 // 环境变量:
@@ -79,9 +79,15 @@ async function processWithDeepSeek(title, body) {
           {
             role: "system",
             content:
-              "你是社交媒体内容助手。用户会给你一条帖子, 请输出 JSON, 字段:\n" +
+              "你是资深金融分析师，擅长从全球资讯中提炼产业与政策信号，并映射到中国 A 股上市公司。\n\n" +
+              "用户会给你一条社交媒体帖子。请先理解其商业、行业或宏观含义，再延伸出可能受影响的 A 股标的。\n\n" +
+              "输出 JSON，字段:\n" +
               '- "translation": 流畅的中文翻译; 若原文已是中文则给出润色后的中文\n' +
-              '- "summary": 2-3 句话概括核心要点\n' +
+              '- "summary": 2-3 句话概括帖子核心信息, 及其对产业或市场的潜在影响\n' +
+              '- "a_shares": 基于帖子内容列出 2-5 只可能相关的 A 股标的, 每只一行, 格式「公司名(代码) — 关联逻辑」; ' +
+              "关联需有清晰逻辑链条, 勿牵强附会; 标的须为真实 A 股上市公司; " +
+              "若帖子与 A 股无明显关联则写「暂无明确 A 股映射」并简要说明原因\n\n" +
+              "注意: 只做信息延伸与逻辑分析, 不做买卖建议; a_shares 末尾单独一行写「⚠️ 仅供参考, 不构成投资建议」\n" +
               "只输出 JSON, 不要 markdown 代码块。",
           },
           { role: "user", content: userContent },
@@ -103,6 +109,7 @@ async function processWithDeepSeek(title, body) {
     return {
       translation: String(parsed.translation || "").trim(),
       summary: String(parsed.summary || "").trim(),
+      aShares: String(parsed.a_shares || parsed.aShares || "").trim(),
     };
   } finally {
     clearTimeout(timer);
@@ -130,7 +137,10 @@ function buildText(entry, ai) {
     lines.push("", "—— 中文翻译 ——", ai.translation);
   }
   if (ai?.summary) {
-    lines.push("", "—— AI 总结 ——", ai.summary);
+    lines.push("", "—— 要点解读 ——", ai.summary);
+  }
+  if (ai?.aShares) {
+    lines.push("", "—— A 股映射 ——", ai.aShares);
   }
 
   if (mediaUrls.length) lines.push("", `🖼 媒体: ${mediaUrls.join("  ")}`);
