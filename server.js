@@ -4,7 +4,7 @@
 // 无状态: 不用轮询、不用去重 (Folo 已替你判新)。
 //
 // 环境变量:
-//   LARK_WEBHOOK       飞书自定义机器人 webhook 地址 (必填)
+//   LARK_WEBHOOK       飞书自定义机器人 webhook, 多个用英文逗号分隔 (必填)
 //   LARK_SECRET        机器人开了「签名校验」才填, 否则留空
 //   DEEPSEEK_API_KEY   DeepSeek API Key (填了才做 AI 翻译/总结)
 //   DEEPSEEK_MODEL     模型名, 默认 deepseek-chat
@@ -16,7 +16,7 @@
 const http = require("http");
 const crypto = require("crypto");
 
-const LARK_WEBHOOK      = process.env.LARK_WEBHOOK || "";
+const LARK_WEBHOOKS     = (process.env.LARK_WEBHOOK || "").split(",").map((s) => s.trim()).filter(Boolean);
 const LARK_SECRET       = process.env.LARK_SECRET || "";
 const DEEPSEEK_API_KEY  = process.env.DEEPSEEK_API_KEY || "";
 const DEEPSEEK_MODEL    = process.env.DEEPSEEK_MODEL || "deepseek-chat";
@@ -156,15 +156,35 @@ function buildText(entry, ai) {
 }
 
 async function forwardToLark(card) {
-  if (!LARK_WEBHOOK) {
+  if (!LARK_WEBHOOKS.length) {
     throw new Error("LARK_WEBHOOK 未配置");
   }
-  const resp = await fetch(LARK_WEBHOOK, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(card),
+
+  const results = await Promise.allSettled(
+    LARK_WEBHOOKS.map(async (webhook, i) => {
+      const resp = await fetch(webhook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(card),
+      });
+      const body = await resp.text();
+      if (!resp.ok) throw new Error(`#${i + 1} ${resp.status}: ${body}`);
+      return { status: resp.status, body };
+    })
+  );
+
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      console.error(`Lark webhook #${i + 1} 失败:`, r.reason?.message || r.reason);
+    }
   });
-  return { status: resp.status, body: await resp.text() };
+
+  const ok = results.filter((r) => r.status === "fulfilled");
+  if (!ok.length) {
+    throw new Error(`全部 ${LARK_WEBHOOKS.length} 个 webhook 转发失败`);
+  }
+
+  return ok[0].value;
 }
 
 const server = http.createServer((req, res) => {
@@ -216,7 +236,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`folo-to-lark listening on :${PORT}`);
-  console.log(`Lark: ${LARK_WEBHOOK ? "configured" : "MISSING — set LARK_WEBHOOK"}`);
+  console.log(`Lark: ${LARK_WEBHOOKS.length ? `${LARK_WEBHOOKS.length} webhook(s) configured` : "MISSING — set LARK_WEBHOOK"}`);
   console.log(`DeepSeek: ${DEEPSEEK_API_KEY ? `enabled (${DEEPSEEK_MODEL})` : "disabled — set DEEPSEEK_API_KEY"}`);
 });
 
